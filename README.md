@@ -88,7 +88,16 @@ node scripts/selftest-notify.mjs "标题" "正文"
     onGoalComplete: true
     # 行为
     suppressGoalRounds: true   # /goal 中间轮次静默
-    rootsOnly: true            # 子代理会话不打扰
+    rootsOnly: true            # 子代理 + 内部 worker 会话不打扰
+    # 内部 worker 的标题前缀——只是**后备**：super-agent 会在创建 worker 时主动登记
+    # （awayNotify.markInternal）。这里覆盖「away-notify 未装/旧版」与「升级前已存在」的会话。
+    # 配成 [] 只关掉标题这条路，不影响登记。见 docs/implementation-notes.md
+    internalSessionTitlePrefixes:
+      - 'Super-agent worker ·'
+    # 插件面板（如 super-agent 的 Router 面板）以此 source retain 会话时，
+    # 该会话算「你正在看」——面板里显示的那条不该再弹通知
+    panelSessionSources:
+      - 'superAgentUi'
     cooldownMs: 10000          # 同会话同类型最小间隔
     presenceTtlMs: 45000       # 在场状态有效期
     previewMaxChars: 140       # 正文摘要截断长度
@@ -131,12 +140,14 @@ node scripts/selftest-notify.mjs "标题" "正文"
   `[dsh:<port>]` 后缀，点击通知仍会聚焦到**出事的那一个实例**；细节与回退开关见
   [docs/windows.md](docs/windows.md#5-多个-dsh-实例并存windows-原生--wsl)
 - **防刷屏**：同会话同类型通知有冷却时间；同一件事反复触发是**替换**而不是叠加（同 tag+group 的
-  通知在 Windows 上是替换语义）；子代理会话默认不打扰；`/goal` 自动推进的中间轮次默认静默，只在
-  目标完成 / 阻塞时提醒
+  通知在 Windows 上是替换语义）；子代理会话与 super-agent 派发的 worker 会话默认不打扰；
+  `/goal` 自动推进的中间轮次默认静默，只在目标完成 / 阻塞时提醒
 - **原生 Toast 细节**：正文标注会话标题与结果摘要，带系统提示音，并带一个可点的操作按钮
-- **可以被别的插件接管**：谁建的会话谁说了算——其它插件能声明「这条会话别打扰」以及「点它的通知
-  时在右栏打开哪个 tab」，away-notify 不认识任何具体插件、也不做标题匹配，见
-  [给其他插件的接口](docs/plugin-api.md)
+- **可以被别的插件接管**：谁建的会话谁说了算——其它插件能声明「这条会话别打扰」「这条是内部会话」
+  以及「点它的通知时在右栏打开哪个 tab」，见 [给其他插件的接口](docs/plugin-api.md)。`super-agent`
+  的 worker 是普通 Session（header 上没有任何标记），由它在创建时调 `awayNotify.markInternal()`
+  登记、关闭时释放；本插件另保留**标题前缀**作为后备（可配置、可关闭，取舍见
+  [实现说明](docs/implementation-notes.md#32-内部会话为什么按标题识别super-agent-worker)）
 
 ---
 
@@ -148,8 +159,12 @@ node scripts/selftest-notify.mjs "标题" "正文"
 | 情况 | 行为 |
 |---|---|
 | 没有任何「新鲜 + 可见 + 有焦点」的标签页 | **提醒**（视为离开） |
-| 有，且能确定它在看哪个会话 | **只抑制该会话**，后台会话照常提醒（理想模式） |
+| 有，且能确定它在看哪个会话 | **只抑制那些会话**，后台会话照常提醒（理想模式） |
 | 有，但拿不到会话 id | 抑制全部（保守降级，等价于「不在页面上才弹」） |
+
+一个标签页可以同时报**多条**「正在看」的会话：主视图那条，加上主区域被插件面板占据时、面板里
+retain 的那条（`panelSessionSources`）。所以你在 super-agent 的 Router 面板里聊天时，Router 跑完
+一轮是**不弹**的；面板关掉、或者切到别的应用，就恢复正常提醒。
 
 换句话说：**切到别的标签页**（页面不可见）或**切到别的应用**（窗口失焦）→ 一律提醒。
 

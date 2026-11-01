@@ -69,9 +69,10 @@
   而漏报，这是实测踩到并修掉的 bug。）
 - 多个标签页各有自己的 clientId，可以**同时**被抑制。
 
-浏览器半部每次上报 `{clientId, sessionId?, visible, focused}`，宿主判定见
-[README 的在场判定表](../README.md#在场判定)。正常情况下运行在理想模式（实测日志
-`mode=session`，会话 id 正确）。
+浏览器半部每次上报 `{clientId, sessionId?, sessionIds?, visible, focused}`，宿主判定见
+[README 的在场判定表](../README.md#在场判定)。`sessionIds` 是「这个标签页此刻正在看的全部会话」
+（主视图 + 面板里显示的，见 [§3.3](#33-面板里显示的会话为什么也要算在场)）；`sessionId` 是它的
+第一条，保留给旧协议/旧宿主。正常情况下运行在理想模式（实测日志 `mode=session`，会话 id 正确）。
 
 `sessionId` 缺省的分支是为客户端启动早期准备的：那时 `sessions.list.getSnapshot()` 还是
 `phase: "pending"`、`ids` 为空、`current` 为 `undefined`，应用完全就绪后才可用。客户端每次心跳
@@ -96,8 +97,8 @@ fetch('/api/dsh-away-notify',{method:'POST',headers:{'content-type':'application
 
 在场判定只能回答「用户在看**哪条**会话」，回答不了「这条会话是不是**根本不该打扰**」，也
 回答不了「点它的通知该去哪儿」。最典型的反例是 `dsh-btw-sidebar` 的侧边聊天：它是主会话 fork
-出来的普通会话，用户正看着侧栏面板里的它，但浏览器半部上报的「当前会话」永远是主视图那条
-（[§4.1](#41-017-的客户端-api-迁移浏览器半部)），于是 `isAttended(childId)` 为 false，跑完一轮
+出来的普通会话，用户正看着侧栏面板里的它，但浏览器半部上报的「当前会话」只覆盖**主区域**
+（[§4.1](#41-017-的客户端-api-迁移浏览器半部)、[§3.3](#33-面板里显示的会话为什么也要算在场)），于是 `isAttended(childId)` 为 false，跑完一轮
 就误弹；而点通知又会把它当成一条普通会话、在主视图里开出来。
 
 `lib/suppress.js` 的 `SuppressionRegistry` 同时管这两件事（一条声明可以只抑制、只揭示，或两者
@@ -130,6 +131,63 @@ fetch('/api/dsh-away-notify',{method:'POST',headers:{'content-type':'application
 `ctx.provide("workspaceChanges", …)`，`dsh-client-ui-deliverables` 在 `inject` 里列它后直接
 `ctx.workspaceChanges.summary(...)` 消费。`provide` 会 `notify` 依赖方，因此 away-notify 晚于
 消费方加载也没问题。诊断通路：`op:'state'` 回显 `suppressed`（每条会话带 `reason` 与 `reveal`）。
+
+### 3.2 内部会话为什么按标题识别（super-agent worker）
+
+`rootsOnly` 原本只拦 `header.origin === 'subagent'` / `delegationDepth > 0` 的会话。**super-agent
+派发的 worker 不满足这两条**，于是它跑完一轮照样弹通知。
+
+真机证据（本机 `~/.dsh/sessions/--mnt-f-project-tools-plugin--/<worker>/session.v4.jsonl.zstd`
+的第一行就是 session header）：
+
+```json
+{"type":"session","version":4,"id":"session-1634530d-…","cwd":"/mnt/f/project/tools/plugin",
+ "isSeeded":false,"delegationDepth":0,"agentPreset":"standard"}
+```
+
+- **没有 `origin`**，`delegationDepth` 是 **0**，`parentSession` 也没有——和用户自己发起的会话
+  header 完全同形。
+- 原因在创建方：跨项目 Worker 要写目标项目，`header.cwd` 必须就是那个项目，所以
+  `dsh-super-agent/lib/index.js` 的 `createSessionWorker` 走 `sessionController.create({cwd})`
+  建**普通 Session**（注释写得很直白："Worker 是普通 Session（跨项目写需要 header.cwd = 目标
+  目录）"），只把标题改成 `Super-agent worker · …`。
+- super-agent 自己的浏览器半部也是按这个标题前缀隐藏 worker 行的（`lib/client.js` 的
+  `data-super-agent-worker-hidden` 那段），所以标题前缀是这套插件体系里**已经存在**的约定。
+
+取舍：`SessionHeader` 没有可扩展字段（`origin` 只允许 `'subagent'`），host 侧拿不到别的依据，
+只能按标题前缀兜底。它是启发式——用户手动改名、或别的插件用同样前缀，都会误判——所以做成
+`internalSessionTitlePrefixes` 配置（默认只含 super-agent 的前缀，配成 `[]` 即关闭）。
+
+**更稳的做法在创建方，且已落地**：`dsh-super-agent/lib/internal-sessions.js` 在 worker 创建
+（`resolveAgent` 成功）后调 `awayNotify.markInternal(sessionId, 'super-agent-worker')`，任务
+关闭/归档/agent 销毁时释放；`awayNotify` 未装、没有该方法、或调用抛错时静默降级。服务晚到或
+热重载时通过 `scoped.inject(['awayNotify'], …)` + `InternalSessionClaims.sync()` 补登记到新实例。
+
+因此现在**两条路径同语义、同 reason**：
+
+| 来源 | 何时用 | 判定 |
+|---|---|---|
+| `markInternal` 登记 | super-agent 创建 worker 时（首选） | `policy.decide` 里 `internalReason(event.sessionId)` 命中 → `internal-session` |
+| 标题前缀 | away-notify 未装/旧版、升级前已存在或重启后未登记的 worker（后备） | `host.js` 的 `hasInternalTitle(titleOf(session))` → `internal-session` |
+
+两条都受 `rootsOnly` 约束（配 `rootsOnly: false` 时一起恢复提醒），`internalSessionTitlePrefixes`
+配成 `[]` 只关掉标题那条、不影响登记。`op:'state'` 的 `suppressed.internal` 只列登记来源；
+开 `debug: true` 时日志 detail 的 `internalSource` 会写 `super-agent-worker` 或 `title-prefix`。
+
+### 3.3 面板里显示的会话为什么也要算「在场」
+
+在场判定原本只认**主视图** retain 的那条会话（`byId[].retainedBy.mainView > 0`）。但主区域可以被
+插件面板占据，面板里的会话是用**自己的 source** retain 的：`dsh-super-agent/lib/client.js` 用
+`sessions.retain(sessionId, { source: 'superAgentUi' })` 把 Router 会话挂进面板，而主视图那条
+仍然是「上一次打开的会话」。
+
+于是「用户在看 Router」被读成「用户在看旧会话 B」，Router 跑完一轮就误弹——用户视角就是
+「我明明盯着它」。修法：浏览器半部在 `ctx.layout.panelInfo.activePanelId !== null`（主区域是面板
+而不是会话视图）时，把 `panelSessionSources` 命中的会话也一并上报（`sessionIds`），宿主按集合
+匹配。面板没开时行为与改动前完全一致。
+
+`activePanelId` 由 `dsh-client-ui-layout` 维护（`layout.selectPanel(id)` 设置、会话视图为
+`null`），面板来源默认 `['superAgentUi']`，由宿主经 `op:'config'` 下发，配成别的来源即可扩展。
 
 ---
 

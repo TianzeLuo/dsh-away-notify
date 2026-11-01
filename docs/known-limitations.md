@@ -75,10 +75,27 @@
 - **跨版本升级可能残留一个旧助手进程**（旧版本用的是全局固定互斥量名），见
   [升级提醒](./windows.md#2-升级提醒可能残留一个旧版焦点助手进程)。
 
+## 内部会话（super-agent worker）
+
+- **worker 由创建方登记，标题前缀只是后备**：super-agent 的 worker 是**普通 Session**
+  （`header` 上没有 `origin`、`delegationDepth` 是 0），DSH 的 `SessionHeader` 又没有可扩展
+  字段。因此 `dsh-super-agent` 在创建 worker 时调用 `awayNotify.markInternal()`、关闭时释放
+  （见[给其他插件的接口](./plugin-api.md)），**用户改标题不影响判定**。
+  标题前缀（`internalSessionTitlePrefixes`，默认 `['Super-agent worker ·']`）仍然保留，覆盖：
+  ① away-notify 未安装 / 版本太旧没有 `markInternal`；② 升级前就已存在、或宿主重启后未被重新
+  登记的 worker。这两类边角里，**改过名的 worker 会重新提醒**；反过来，别的插件若用同样前缀
+  命名会话，也会被一起静音（配成 `[]` 即关闭标题这条路）。
+- **「只对用户可感知的会话提醒」的边界就是上面两条**：DSH 标了记的子代理 + 标题前缀命中的内部
+  会话；其它后台会话（用户自己起的）照常提醒。
+
 ## 框架行为
 
 - **在场状态的 TTL 是 45 秒**（`presenceTtlMs`）。这是「不做静音黑洞」的代价与保障：标签页崩溃、
   浏览器被关掉之后，45 秒内插件仍可能认为你在看那条会话。
+- **一个标签页可以同时「在看」多条会话**：主视图那条 + 主区域被插件面板占据时面板 retain 的那条
+  （`panelSessionSources`，默认 `superAgentUi`）。面板没开时只报主视图那条。面板来源是**按
+  retain 来源字符串**匹配的——面板插件换了 source 名就匹配不上（退回旧行为：面板里的会话会提醒），
+  改配置即可。
 - presence 端点的注册清理绑定在 connection 服务的 fiber 上（框架语义），HMR 重载插件时端点可能
   不会随之注销，但重复注册是覆盖语义，不会报错。
 - 多标签页同时打开时，每个标签页都会独立上报（这是设计如此，多标签都能各自被抑制），因此切换

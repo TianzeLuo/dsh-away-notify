@@ -41,6 +41,59 @@ test('rootsOnly=false 时子代理也通知', () => {
   assert.equal(r.notify, true);
 });
 
+test('默认忽略内部 worker 会话（没有 subagent 标记、按标题认出来的）', () => {
+  const r = decide(ev({ isInternal: true }), { isAttended: () => false });
+  assert.equal(r.notify, false);
+  assert.equal(r.reason, 'internal-session', '原因要和子代理分开，排障时能分清通路');
+});
+
+test('rootsOnly=false 时内部 worker 也通知', () => {
+  const r = decide(ev({ isInternal: true }), { isAttended: () => false, policy: { rootsOnly: false } });
+  assert.equal(r.notify, true);
+});
+
+test('创建方登记的内部会话（markInternal）同样按 internal-session 静默', () => {
+  // 标题完全不像 worker：真正生效的是登记，而不是标题前缀
+  const r = decide(ev({ sessionTitle: '用户随手改的标题' }), {
+    isAttended: () => false,
+    internalReason: (id) => (id === 's1' ? 'super-agent-worker' : undefined),
+  });
+  assert.equal(r.notify, false);
+  assert.equal(r.reason, 'internal-session', '与标题前缀那条路径共用同一个 reason');
+  assert.equal(r.internalSource, 'super-agent-worker', '来源只用于排障');
+});
+
+test('登记只作用于被登记的那条会话', () => {
+  const r = decide(ev({ sessionId: 's2' }), {
+    isAttended: () => false,
+    internalReason: (id) => (id === 's1' ? 'super-agent-worker' : undefined),
+  });
+  assert.equal(r.notify, true, '别的会话照常提醒');
+});
+
+test('rootsOnly=false 时登记的内部会话也恢复提醒（与标题路径一致）', () => {
+  const r = decide(ev(), {
+    isAttended: () => false,
+    internalReason: () => 'super-agent-worker',
+    policy: { rootsOnly: false },
+  });
+  assert.equal(r.notify, true);
+});
+
+test('标题路径与登记路径的 reason 完全相同（不引入两套语义）', () => {
+  const byTitle = decide(ev({ isInternal: true }), { isAttended: () => false });
+  const byRegister = decide(ev(), { isAttended: () => false, internalReason: () => 'super-agent-worker' });
+  assert.equal(byTitle.reason, byRegister.reason);
+  assert.equal(byTitle.reason, 'internal-session');
+  assert.equal(byTitle.internalSource, 'title-prefix');
+});
+
+test('子代理与内部 worker 同时为真时按子代理报原因', () => {
+  const r = decide(ev({ isSubagent: true, isInternal: true }), { isAttended: () => false });
+  assert.equal(r.notify, false);
+  assert.equal(r.reason, 'subagent-session');
+});
+
 test('五类触发默认全部开启', () => {
   for (const k of [
     'turn-complete',

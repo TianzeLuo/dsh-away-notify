@@ -9,7 +9,13 @@ const PRESENCE_PATH = '/api/dsh-away-notify';
 const FOCUS_PARAM = 'dshAwayNotifyFocus';
 
 /** 建立最小 DOM 桩并加载 client.js，返回其导出。 */
-async function loadClientModule({ search = '', pendingFocusReply = null, reveal = null, titleTagReply } = {}) {
+async function loadClientModule({
+  search = '',
+  pendingFocusReply = null,
+  reveal = null,
+  titleTagReply,
+  configReply,
+} = {}) {
   const listeners = [];
   const registrations = [];
   const observerInstances = [];
@@ -77,6 +83,7 @@ async function loadClientModule({ search = '', pendingFocusReply = null, reveal 
     // 宿主的 pending-focus / config 应答由测试控制
     let payload = { ok: true };
     if (reqBody.op === 'pending-focus') payload = { ok: true, sessionId: pendingFocusReply, reveal };
+    else if (reqBody.op === 'config' && configReply !== undefined) payload = { ok: true, ...configReply };
     else if (reqBody.op === 'config' && titleTagReply !== undefined) {
       payload = { ok: true, titleTag: titleTagReply };
     }
@@ -134,6 +141,7 @@ function makeClientCtx({
   autoMountSession = false,
   mountedInitial = 's1',
   withoutMountedObservable = false,
+  panel = null,
 } = {}) {
   const opened = [];
   const openedViaWorkspace = [];
@@ -191,6 +199,16 @@ function makeClientCtx({
       for (const d of disposers.splice(0)) d();
     },
   };
+  // dsh-client-ui-layout 的面板选择状态（`ctx.layout.panelInfo`）。null = 主区域是会话视图。
+  if (panel !== null) {
+    const panelState = { activePanelId: panel };
+    ctx.layout = {
+      panelInfo: {
+        getSnapshot: () => ({ ...panelState }),
+        subscribe: () => () => {},
+      },
+    };
+  }
   // dsh 0.1.7 的会话切换服务
   if (withWorkspace) {
     ctx.uiWorkspace = { openSession: (id) => { openedViaWorkspace.push(id); noteOpen(id); } };
@@ -374,6 +392,87 @@ test('0.1.7：retainedBy 结构缺失/异常时不会崩，退化为页面级', 
   const presence = mod.fetchCalls.filter((c) => JSON.parse(c.init.body).op === 'presence');
   assert.ok(presence.length >= 1);
   assert.equal('sessionId' in JSON.parse(presence.at(-1).init.body), false);
+});
+
+// ── 主区域被插件面板占据：面板里的会话也算「正在看」 ────────────────────────
+//
+// 真机场景：super-agent 的 Router 面板占着主区域，它用 `source: 'superAgentUi'`
+// retain Router 会话；主视图那条仍然是上一次打开的会话。只报主视图那条的话，
+// Router 跑完一轮就会误弹通知——即使你正盯着它看。
+
+test('面板占着主区域时，把面板 retain 的会话一起上报', async () => {
+  const { mod } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router', retainedBy: { superAgentUi: 1 } },
+        background: { id: 'background', retainedBy: {} },
+      },
+      panel: 'super-agent',
+    },
+  );
+  const presence = mod.fetchCalls.filter((c) => JSON.parse(c.init.body).op === 'presence');
+  const body = JSON.parse(presence.at(-1).init.body);
+  assert.equal(body.sessionId, 'main', 'sessionId 仍是主视图那条（旧宿主只认这个字段）');
+  assert.deepEqual(body.sessionIds, ['main', 'router'], '面板里的会话必须一并报给宿主');
+  assert.equal(body.sessionIds.includes('background'), false, '没被任何 UI retain 的会话不该混进来');
+});
+
+test('面板没开时只报主视图那条，不会因为后台 retain 多静音', async () => {
+  const { mod } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router', retainedBy: { superAgentUi: 1 } },
+      },
+      panel: null,
+    },
+  );
+  const presence = mod.fetchCalls.filter((c) => JSON.parse(c.init.body).op === 'presence');
+  const body = JSON.parse(presence.at(-1).init.body);
+  assert.deepEqual(body.sessionIds, ['main'], '面板关着时行为与改动前一致');
+});
+
+test('面板会话来源由宿主配置下发（默认值之外可扩展）', async () => {
+  const { mod } = await boot(
+    { configReply: { titleTag: true, panelSessionSources: ['myPanel'] } },
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        mine: { id: 'mine', retainedBy: { myPanel: 1 } },
+        router: { id: 'router', retainedBy: { superAgentUi: 1 } },
+      },
+      panel: 'my-panel',
+    },
+  );
+  // op:'config' 的应答是异步落地的：等它到达后再触发一次常规上报
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  mod.listeners.find(([target, type]) => target === 'window' && type === 'focus')[2]();
+  const presence = mod.fetchCalls.filter((c) => JSON.parse(c.init.body).op === 'presence');
+  const body = JSON.parse(presence.at(-1).init.body);
+  assert.deepEqual(body.sessionIds, ['main', 'mine'], '宿主配的来源生效，默认值被替换');
+});
+
+test('布局服务缺失（老版本）时不报面板会话，也不崩', async () => {
+  const { mod } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router', retainedBy: { superAgentUi: 1 } },
+      },
+      panel: null,
+    },
+  );
+  const presence = mod.fetchCalls.filter((c) => JSON.parse(c.init.body).op === 'presence');
+  assert.ok(presence.length >= 1);
+  assert.deepEqual(JSON.parse(presence.at(-1).init.body).sessionIds, ['main']);
 });
 
 test('切换会话时通过 list.subscribe 立刻重报新会话', async () => {

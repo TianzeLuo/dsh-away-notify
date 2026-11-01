@@ -61,6 +61,53 @@ test('回归：切换会话不受 TTL 影响（不需要等 45 秒）', () => {
   assert.equal(store.isAttended('s1'), false);
 });
 
+// ── 一个客户端同时看多条会话（主视图 + 插件面板）────────────────────────────
+
+test('面板里显示的会话也算在场：sessionIds 里每条都被抑制', () => {
+  const { store } = makeStore();
+  store.report({
+    clientId: 'tab1',
+    sessionId: 'main',
+    sessionIds: ['main', 'router'],
+    visible: true,
+    focused: true,
+  });
+  assert.equal(store.isAttended('main'), true);
+  assert.equal(store.isAttended('router'), true, '面板里看着的那条必须算在场');
+  assert.equal(store.isAttended('worker'), false, '没在看的会话照常提醒');
+  assert.deepEqual(store.attendedSessions().sort(), ['main', 'router']);
+  assert.equal(store.mode(), 'session');
+});
+
+test('sessionIds 里的非法值被丢掉，sessionId 仍然生效', () => {
+  const { store } = makeStore();
+  store.report({
+    clientId: 'tab1',
+    sessionId: 'main',
+    sessionIds: ['', null, 42, undefined, 'main', 'router', 'router'],
+    visible: true,
+    focused: true,
+  });
+  assert.deepEqual(store.attendedSessions(), ['main', 'router']);
+  assert.equal(store.isAttended('main'), true);
+});
+
+test('只给 sessionIds 时（新协议不回填 sessionId）同样工作', () => {
+  const { store } = makeStore();
+  store.report({ clientId: 'tab1', sessionIds: ['panel'], visible: true, focused: true });
+  assert.equal(store.isAttended('panel'), true);
+  assert.equal(store.isAttended('other'), false);
+});
+
+test('面板关掉后回到单会话上报：面板那条立刻恢复提醒', () => {
+  const { store } = makeStore();
+  store.report({ clientId: 'tab1', sessionIds: ['main', 'router'], visible: true, focused: true });
+  assert.equal(store.isAttended('router'), true);
+  watch(store, 'tab1', 'main');
+  assert.equal(store.isAttended('router'), false, '面板会话不该因为 TTL 继续被静音');
+  assert.equal(store.isAttended('main'), true);
+});
+
 // ── 多标签页 ────────────────────────────────────────────────────────────────
 
 test('多标签页：两个标签页各看一个会话，两个都被抑制', () => {

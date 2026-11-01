@@ -136,7 +136,68 @@ test('snapshot 带版本号、会话与规则清单', () => {
     version: SUPPRESS_API_VERSION,
     sessions: [{ sessionId: 's1', reason: 'a' }],
     rules: [{ id: 'r', reason: 'b' }],
+    internal: [],
   });
+});
+
+// ── 创建方声明的内部会话（markInternal）──────────────────────────────────────
+
+test('markInternal 登记内部会话，释放后撤销；不影响「抑制」语义', () => {
+  const registry = new SuppressionRegistry();
+  assert.equal(registry.internalReasonFor('w1'), undefined);
+
+  const release = registry.markInternal('w1', 'super-agent-worker');
+  assert.equal(registry.internalReasonFor('w1'), 'super-agent-worker');
+  assert.equal(registry.isSuppressed('w1'), false, '内部会话不是「抑制」，别混进 reasonFor');
+  assert.deepEqual(registry.snapshot().internal, [{ sessionId: 'w1', reason: 'super-agent-worker' }]);
+  assert.deepEqual(registry.snapshot().sessions, [], '内部会话单独列，不进 sessions');
+
+  assert.equal(release(), true);
+  assert.equal(registry.internalReasonFor('w1'), undefined);
+  assert.equal(release(), false, '重复释放只有第一次生效');
+});
+
+test('markInternal 重复登记按会话去重诊断，各自释放互不影响', () => {
+  const registry = new SuppressionRegistry();
+  const first = registry.markInternal('w1', 'a');
+  const second = registry.markInternal('w1', 'b');
+  assert.deepEqual(
+    registry.snapshot().internal,
+    [{ sessionId: 'w1', reason: 'a' }],
+    '诊断按会话去重（同一会话多条声明只列第一条）',
+  );
+  assert.equal(first(), true);
+  assert.equal(registry.internalReasonFor('w1'), 'b', '第一个释放后另一个声明仍然有效');
+  assert.equal(second(), true);
+  assert.equal(registry.internalReasonFor('w1'), undefined);
+});
+
+test('markInternal 传非法 id 时返回空操作', () => {
+  const registry = new SuppressionRegistry();
+  for (const bad of ['', null, 42, undefined]) {
+    assert.equal(registry.markInternal(bad, 'x')(), false);
+  }
+  assert.deepEqual(registry.snapshot().internal, []);
+});
+
+test('release() 撤销一条会话的全部声明（抑制 + 内部 + 揭示）', () => {
+  const registry = new SuppressionRegistry();
+  registry.claim('s1', 'claim');
+  registry.markInternal('s1', 'worker');
+  registry.reveal('s1', { resource: 'dsh-resource://x', reason: 'reveal' });
+  assert.equal(registry.internalReasonFor('s1'), 'worker');
+  assert.equal(registry.release('s1'), 3);
+  assert.equal(registry.isSuppressed('s1'), false);
+  assert.equal(registry.internalReasonFor('s1'), undefined);
+  assert.equal(registry.revealFor('s1'), undefined);
+});
+
+test('clear 清空内部会话声明', () => {
+  const registry = new SuppressionRegistry();
+  registry.markInternal('w1', 'worker');
+  registry.clear();
+  assert.equal(registry.internalReasonFor('w1'), undefined);
+  assert.deepEqual(registry.snapshot().internal, []);
 });
 
 test('clear 清空全部状态', () => {

@@ -360,6 +360,8 @@ test('五类触发 + 关键行为默认值正确', () => {
   }
   assert.equal(DEFAULTS.suppressGoalRounds, true);
   assert.equal(DEFAULTS.rootsOnly, true);
+  assert.deepEqual(DEFAULTS.internalSessionTitlePrefixes, ['Super-agent worker ·'], 'worker 会话按标题前缀识别');
+  assert.deepEqual(DEFAULTS.panelSessionSources, ['superAgentUi'], '面板里显示的会话也算在场');
   assert.equal(DEFAULTS.openOnClick, true);
   assert.equal(DEFAULTS.includeToken, true);
   assert.equal(DEFAULTS.sound, true);
@@ -725,6 +727,8 @@ test('加载时提供 awayNotify 服务，接口面带版本号', () => {
     'addRule',
     'revealSession',
     'revealFor',
+    'markInternal',
+    'isInternal',
     'snapshot',
   ]) {
     assert.equal(typeof service[method], 'function', `${method} 应是函数`);
@@ -1009,4 +1013,239 @@ test('揭示目标也进 state 诊断', async () => {
   assert.deepEqual(body.suppressed.sessions, [
     { sessionId: 's-side', reveal: { resource: 'dsh-resource://btw/session/s-side', reason: 'btw' } },
   ]);
+});
+
+// ── 回归：聚焦当前会话 / super-agent worker ────────────────────────────────
+//
+// 两个真机误触发：
+//   1. 用户正看着这条会话（主视图那条，或面板里显示的那条），它跑完一轮还是弹通知；
+//   2. super-agent 派发的 worker 是**普通 Session**（header 上没有 origin /
+//      delegationDepth），于是 `rootsOnly` 拦不住，worker 结束照样弹通知。
+//
+// 这里在「事件 → 决策 → 真的去弹」这条链路的末端断言：只看得到 CreateToastNotifier
+// 的脚本，而撤回脚本（History.Remove）不算提醒。
+
+/** 有没有真的发过一条通知（撤回/注册脚本不算）。 */
+const notified = (logPath) =>
+  readScripts(logPath).some((script) => script.includes('CreateToastNotifier'));
+
+test('回归：聚焦当前会话时回合结束不弹；真的离开后照常提醒', async () => {
+  const fake = makeFakeSpawn();
+  const restore = pretendWindows(fake.psPath);
+  try {
+    const ctx = makeCtx();
+    applyHost(ctx, {}, fake.deps);
+    ctx.sessions.add(session('s1'));
+
+    // 用户就在 s1 上：可见 + 有焦点
+    await reportPresence(ctx, 's1', true, true);
+    ctx.emit('session/event', ctx.sessions.get('s1'), turnEnd());
+    await settle();
+    assert.equal(notified(fake.logPath), false, '人正看着 s1，回合结束不该弹通知');
+
+    // 切到别的应用（标签页仍可见，但焦点不在 dsh）：这才是「离开」
+    await reportPresence(ctx, 's1', true, false);
+    ctx.emit('session/event', ctx.sessions.get('s1'), turnEnd(2));
+    await settle();
+    assert.equal(notified(fake.logPath), true, '真的离开后仍必须提醒（不能把功能修没）');
+  } finally {
+    restore();
+    fake.cleanup();
+  }
+});
+
+test('回归：面板里显示的会话结束不弹（主视图那条不是用户在看的那条）', async () => {
+  const fake = makeFakeSpawn();
+  const restore = pretendWindows(fake.psPath);
+  try {
+    const ctx = makeCtx();
+    applyHost(ctx, {}, fake.deps);
+    ctx.sessions.add(session('main'));
+    ctx.sessions.add(session('router'));
+    ctx.sessions.add(session('other'));
+
+    // 主视图停在 main，但用户在看 super-agent 面板里的 router（client 会两条都报）
+    await callEndpoint(ctx, {
+      op: 'presence',
+      clientId: 'tab1',
+      sessionId: 'main',
+      sessionIds: ['main', 'router'],
+      visible: true,
+      focused: true,
+    });
+
+    ctx.emit('session/event', ctx.sessions.get('router'), turnEnd());
+    await settle();
+    assert.equal(notified(fake.logPath), false, '面板里正在看的那条结束也不该弹');
+
+    // 后台会话 other 结束仍然要提醒（面板不会把所有会话都静音）
+    ctx.emit('session/event', ctx.sessions.get('other'), turnEnd());
+    await settle();
+    assert.equal(notified(fake.logPath), true, '后台会话该照常提醒');
+  } finally {
+    restore();
+    fake.cleanup();
+  }
+});
+
+test('回归：super-agent worker 会话（普通 Session，没有 origin 标记）结束不弹', async () => {
+  const fake = makeFakeSpawn();
+  const restore = pretendWindows(fake.psPath);
+  try {
+    const ctx = makeCtx();
+    applyHost(ctx, {}, fake.deps);
+    // 真机 header 就是这样：没有 origin，delegationDepth 为 0
+    const worker = session('worker', {
+      header: { delegationDepth: 0, agentPreset: 'standard', isSeeded: false, cwd: '/mnt/f/project/tools/plugin' },
+      __title: 'Super-agent worker · 修复 dsh-away-notify 插件误触发',
+    });
+    ctx.sessions.add(worker);
+
+    await reportPresence(ctx, 'worker', false, false); // 用户已经离开
+    ctx.emit('session/event', worker, turnEnd());
+    await settle();
+    assert.equal(notified(fake.logPath), false, 'worker 是内部会话，不该打扰用户');
+
+    // 用户自己的主会话照常提醒（这里同时证明「离开就提醒」没被破坏）
+    const own = session('own', { __title: '我自己的会话' });
+    ctx.sessions.add(own);
+    ctx.emit('session/event', own, turnEnd());
+    await settle();
+    assert.equal(notified(fake.logPath), true, '用户直接发起的会话仍要提醒');
+  } finally {
+    restore();
+    fake.cleanup();
+  }
+});
+
+test('回归：子代理标记（origin=subagent）仍然按子代理抑制，与前缀无关', async () => {
+  const fake = makeFakeSpawn();
+  const restore = pretendWindows(fake.psPath);
+  try {
+    const ctx = makeCtx();
+    applyHost(ctx, {}, fake.deps);
+    const child = session('child', { header: { origin: 'subagent', delegationDepth: 1 }, __title: '子代理' });
+    ctx.sessions.add(child);
+    await reportPresence(ctx, 'child', false, false);
+    ctx.emit('session/event', child, turnEnd());
+    await settle();
+    assert.equal(notified(fake.logPath), false);
+  } finally {
+    restore();
+    fake.cleanup();
+  }
+});
+
+test('worker 前缀可清空：配成 [] 就退回「只有子代理不打扰」的旧行为', async () => {
+  const fake = makeFakeSpawn();
+  const restore = pretendWindows(fake.psPath);
+  try {
+    const ctx = makeCtx();
+    applyHost(ctx, { internalSessionTitlePrefixes: [] }, fake.deps);
+    const worker = session('worker2', { __title: 'Super-agent worker · 旧行为' });
+    ctx.sessions.add(worker);
+    await reportPresence(ctx, 'worker2', false, false);
+    ctx.emit('session/event', worker, turnEnd());
+    await settle();
+    assert.equal(notified(fake.logPath), true, '关掉前缀识别后，worker 会话恢复提醒（可配置）');
+  } finally {
+    restore();
+    fake.cleanup();
+  }
+});
+
+test('op:config 把面板会话来源下发给浏览器半部', async () => {
+  const ctx = makeCtx();
+  applyHost(ctx, {});
+  const { body } = await callEndpoint(ctx, { op: 'config' });
+  assert.deepEqual(body.panelSessionSources, ['superAgentUi']);
+});
+
+// ── 决策 1：创建方登记内部会话（awayNotify.markInternal）────────────────────
+
+test('回归：标题不像 worker、但已通过 markInternal 登记 → 不弹通知', async () => {
+  const fake = makeFakeSpawn();
+  const restore = pretendWindows(fake.psPath);
+  try {
+    const ctx = makeCtx();
+    applyHost(ctx, {}, fake.deps);
+    // 用户把 worker 标题改得完全不像内部会话：前缀那条路失效，只剩登记
+    const worker = session('worker-renamed', { __title: '我随手改的标题' });
+    ctx.sessions.add(worker);
+    const away = awayNotifyOf(ctx);
+    away.markInternal('worker-renamed', 'super-agent-worker');
+
+    await reportPresence(ctx, 'worker-renamed', false, false);
+    ctx.emit('session/event', worker, turnEnd());
+    await settle();
+    assert.equal(notified(fake.logPath), false, '登记过的内部会话不该打扰');
+  } finally {
+    restore();
+    fake.cleanup();
+  }
+});
+
+test('markInternal 与标题前缀同语义：配成空前缀后登记仍然生效', async () => {
+  const fake = makeFakeSpawn();
+  const restore = pretendWindows(fake.psPath);
+  try {
+    const ctx = makeCtx();
+    // 关掉标题前缀那条路，只留登记
+    applyHost(ctx, { internalSessionTitlePrefixes: [] }, fake.deps);
+    const worker = session('registered-only', { __title: '随便什么标题' });
+    ctx.sessions.add(worker);
+    awayNotifyOf(ctx).markInternal('registered-only', 'super-agent-worker');
+
+    await reportPresence(ctx, 'registered-only', false, false);
+    ctx.emit('session/event', worker, turnEnd());
+    await settle();
+    assert.equal(notified(fake.logPath), false, '登记不依赖 internalSessionTitlePrefixes');
+  } finally {
+    restore();
+    fake.cleanup();
+  }
+});
+
+test('登记只影响目标会话：释放后恢复提醒，别的会话始终照常', async () => {
+  const fake = makeFakeSpawn();
+  const restore = pretendWindows(fake.psPath);
+  try {
+    const ctx = makeCtx();
+    applyHost(ctx, {}, fake.deps);
+    const worker = session('w-release', { __title: '任意标题' });
+    const own = session('own-2', { __title: '我自己的会话' });
+    ctx.sessions.add(worker);
+    ctx.sessions.add(own);
+    const away = awayNotifyOf(ctx);
+    const release = away.markInternal('w-release', 'super-agent-worker');
+
+    await reportPresence(ctx, 'w-release', false, false);
+    ctx.emit('session/event', worker, turnEnd());
+    await settle();
+    assert.equal(notified(fake.logPath), false, '登记期间不打扰');
+    assert.equal(away.isInternal('w-release'), 'super-agent-worker');
+
+    release();
+    assert.equal(away.isInternal('w-release'), undefined);
+    ctx.emit('session/event', worker, turnEnd(2));
+    await settle();
+    assert.equal(notified(fake.logPath), true, '释放后恢复提醒');
+
+    // 语义上「用户自己的会话」从来不受登记影响
+    ctx.emit('session/event', own, turnEnd());
+    await settle();
+    assert.ok(readScripts(fake.logPath).filter((script) => script.includes('CreateToastNotifier')).length >= 2);
+  } finally {
+    restore();
+    fake.cleanup();
+  }
+});
+
+test('op:state 诊断把内部会话单独列出（不混进 suppressed）', async () => {
+  const ctx = makeCtx();
+  applyHost(ctx, {});
+  awayNotifyOf(ctx).markInternal('w-state', 'super-agent-worker');
+  const { body } = await callEndpoint(ctx, { op: 'state' });
+  assert.deepEqual(body.suppressed.internal, [{ sessionId: 'w-state', reason: 'super-agent-worker' }]);
+  assert.deepEqual(body.suppressed.sessions, [], '内部会话不是抑制，别混进 sessions');
 });
