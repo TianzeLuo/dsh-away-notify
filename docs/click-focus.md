@@ -239,6 +239,13 @@ Local\dsh-away-notify-focus-helper-<SHA1(小写、去掉尾部分隔符的 spool
 2. 浏览器半部在**页面加载时**、以及**每次重新获得焦点 / 页面可见时**，调用
    `POST /api/dsh-away-notify {op:'pending-focus'}` 索取目标会话；
 3. 拿到后按优先级处理：
+   - **目标会话所在的面板**：若目标正被某个主区域面板的 retain 来源挂住（例如 super-agent 的
+     Router 面板），先 `ctx.layout.selectPanel(面板 id)` 激活它，**不再走 `openSession`**——后者
+     内部会 `selectPanel(null)` 把面板关掉。面板归属优先来自面板插件的**显式注册**
+     （`awayNotifyPanels.register`，见[给其他插件的接口](./plugin-api.md)）；没注册时退回运行时
+     学习（面板激活后第一条新出现的 retain 来源，已显式注册的来源不参与学习）。关掉面板 /
+     刷新页面后靠 `localStorage` 的「会话 → 面板」记忆重新打开；布局服务缺失、`selectPanel`
+     抛错、面板未注册时继续走下一档；
    - **揭示目标**（若发通知的插件用 `awayNotify.revealSession` 声明过，回包里带
      `reveal: { resource, mainSessionId? }`）：先 `ctx.sidebarRight.openResource(地址)`——那个 tab
      已经开着就**聚焦它**，没开就新开并展开右栏；这样侧边聊天之类的「插件自己的面板」会回到原

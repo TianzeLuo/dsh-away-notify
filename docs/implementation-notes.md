@@ -187,7 +187,29 @@ fetch('/api/dsh-away-notify',{method:'POST',headers:{'content-type':'application
 匹配。面板没开时行为与改动前完全一致。
 
 `activePanelId` 由 `dsh-client-ui-layout` 维护（`layout.selectPanel(id)` 设置、会话视图为
-`null`），面板来源默认 `['superAgentUi']`，由宿主经 `op:'config'` 下发，配成别的来源即可扩展。
+`null`），面板来源默认 `['superAgentUi']`，由宿主经 `op:'config'` 下发，配成别的来源即可扩展；
+浏览器半部还会把面板**显式注册**的来源（`awayNotifyPanels.register`）与面板挂载时学到的来源并进来。
+
+### 3.4 点击通知为什么必须区分「面板」与「主视图」
+
+修好 3.3 的误弹之后还剩一半问题：点通知仍然落到主视图。调用链是这样的：
+
+1. 点击 → 聚焦脚本 → 浏览器半部 `consumePendingFocus()` 向宿主取 `pending-focus`（宿主在
+   `fire()` 里记下 `pendingFocus`，见 `lib/host.js`）；
+2. 目标会话此时被面板用 `source: 'superAgentUi'` retain（`dsh-super-agent/lib/client.js`），
+   但旧代码只认「主视图/右栏」两条路；
+3. 于是走到 `resolveSessionOpener()` → `uiWorkspace.openSession(target)`，而它在
+   `dsh-client-ui-workspace/lib/client.js` 里是 `replaceMain(target, signal, 'reveal')`，
+   最后一步 `ctx.layout.selectPanel(null)` **把面板关掉**，再把会话放进主视图。
+
+改法：点击前先算「目标会话属于哪个面板」，命中就 `layout.selectPanel(panelId)` 并回执，不再走
+`openSession`。归属不写死：**面板插件显式注册优先**（`awayNotifyPanels.register`，见
+[给其他插件的接口](./plugin-api.md#面板点击落点浏览器侧-awaynotifypanels)），没注册时退回
+自动学习——面板被选中时先拍下当前 retain 来源快照，激活后 15 秒内第一条新出现的来源认作该
+面板的（已显式注册的来源不参与学习；学到后按 source 映射会话）；同时把「会话 → 面板」写进
+`localStorage`（上限 100、30 天），所以面板关掉甚至刷新后仍能重新打开。
+面板 API 缺失、`selectPanel` 抛错、面板未注册、会话已关闭时一律退回原来的「揭示目标 / 主视图」，
+点击不会变成没反应。
 
 ---
 

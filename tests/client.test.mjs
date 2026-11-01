@@ -15,6 +15,7 @@ async function loadClientModule({
   reveal = null,
   titleTagReply,
   configReply,
+  panelMemory,
 } = {}) {
   const listeners = [];
   const registrations = [];
@@ -60,6 +61,19 @@ async function loadClientModule({
   };
 
   const fetchCalls = [];
+  /** pending-focus 的应答由测试随时改写（模拟「现在才点通知」）。 */
+  const focusReply = { sessionId: pendingFocusReply, reveal };
+  /** localStorage 替身：面板归属记忆持久化测试要能预置 / 观察。 */
+  const storageData = new Map();
+  if (panelMemory !== undefined) {
+    storageData.set('dshAwayNotify.panelMemory.v1', JSON.stringify(panelMemory));
+  }
+  const storage = {
+    getItem: (key) => (storageData.has(key) ? storageData.get(key) : null),
+    setItem: (key, value) => storageData.set(key, String(value)),
+    removeItem: (key) => storageData.delete(key),
+    snapshot: () => Object.fromEntries(storageData),
+  };
   const replaced = {
     window: globalThis.window,
     document: globalThis.document,
@@ -67,10 +81,12 @@ async function loadClientModule({
     history: globalThis.history,
     fetch: globalThis.fetch,
     MutationObserver: globalThis.MutationObserver,
+    localStorage: globalThis.localStorage,
   };
 
   globalThis.window = windowStub;
   globalThis.document = documentStub;
+  globalThis.localStorage = storage;
   globalThis.MutationObserver = FakeMutationObserver;
   globalThis.fetch = (url, init) => {
     fetchCalls.push({ url, init });
@@ -82,7 +98,7 @@ async function loadClientModule({
     }
     // 宿主的 pending-focus / config 应答由测试控制
     let payload = { ok: true };
-    if (reqBody.op === 'pending-focus') payload = { ok: true, sessionId: pendingFocusReply, reveal };
+    if (reqBody.op === 'pending-focus') payload = { ok: true, sessionId: focusReply.sessionId, reveal: focusReply.reveal };
     else if (reqBody.op === 'config' && configReply !== undefined) payload = { ok: true, ...configReply };
     else if (reqBody.op === 'config' && titleTagReply !== undefined) {
       payload = { ok: true, titleTag: titleTagReply };
@@ -115,6 +131,12 @@ async function loadClientModule({
     documentStub,
     windowStub,
     observerInstances,
+    storage,
+    /** 模拟「宿主刚刚记下待跳转会话」（点击通知后浏览器半部才来取）。 */
+    setPendingFocus: (sessionId, nextReveal = null) => {
+      focusReply.sessionId = sessionId;
+      focusReply.reveal = nextReveal;
+    },
     /** 模拟 dsh-client-ui-layout 重写 document.title，然后触发观察者。 */
     overwriteTitle: (next) => {
       documentStub.title = next;
@@ -127,6 +149,7 @@ async function loadClientModule({
       globalThis.history = replaced.history;
       globalThis.fetch = replaced.fetch;
       globalThis.MutationObserver = replaced.MutationObserver;
+      globalThis.localStorage = replaced.localStorage;
     },
   };
 }
@@ -142,6 +165,12 @@ function makeClientCtx({
   mountedInitial = 's1',
   withoutMountedObservable = false,
   panel = null,
+  /** 是否提供布局服务。默认沿用旧行为：只有传了 panel 才算「布局存在」。 */
+  layout = panel !== null,
+  /** `selectPanel` 行为：'ok' 正常，'throws' 模拟面板未注册 / 版本不兼容。 */
+  selectPanelMode = 'ok',
+  /** 提供 `hasMainPanel` 时，只有这些面板 id 算已注册。 */
+  registeredPanels = null,
 } = {}) {
   const opened = [];
   const openedViaWorkspace = [];
@@ -200,15 +229,50 @@ function makeClientCtx({
     },
   };
   // dsh-client-ui-layout 的面板选择状态（`ctx.layout.panelInfo`）。null = 主区域是会话视图。
-  if (panel !== null) {
+  ctx.selectedPanels = [];
+  if (layout) {
     const panelState = { activePanelId: panel };
+    const panelListeners = new Set();
     ctx.layout = {
       panelInfo: {
         getSnapshot: () => ({ ...panelState }),
-        subscribe: () => () => {},
+        subscribe: (fn) => {
+          panelListeners.add(fn);
+          return () => panelListeners.delete(fn);
+        },
+      },
+      selectPanel: (id) => {
+        ctx.selectedPanels.push(id);
+        if (selectPanelMode === 'throws') throw new Error('layout.selectPanel: main panel is not registered');
+        panelState.activePanelId = id;
+        for (const fn of [...panelListeners]) fn();
       },
     };
+    if (Array.isArray(registeredPanels)) {
+      ctx.layout.hasMainPanel = (id) => registeredPanels.includes(id);
+    }
+    /** 模拟用户点击侧栏面板按钮（不经过 selectPanel 记录，避免和点击落点混淆）。 */
+    ctx.setPanel = (id) => {
+      panelState.activePanelId = id;
+      for (const fn of [...panelListeners]) fn();
+    };
+  } else {
+    ctx.setPanel = () => {};
   }
+  /** 替换会话列表（模拟面板挂载后 retain / 卸载后 release）。 */
+  ctx.setById = (next) => {
+    state.byId = next;
+  };
+  /** 插件提供的客户端服务（`ctx.reflect.provide`）。 */
+  ctx.provided = {};
+  ctx.reflect = {
+    provide: (name, service) => {
+      ctx.provided[name] = service;
+      return () => {
+        delete ctx.provided[name];
+      };
+    },
+  };
   // dsh 0.1.7 的会话切换服务
   if (withWorkspace) {
     ctx.uiWorkspace = { openSession: (id) => { openedViaWorkspace.push(id); noteOpen(id); } };
@@ -882,4 +946,600 @@ test('dispose 时撤下 tag', async () => {
   assert.equal(mod.documentStub.title, '我的会话 — DeepSeek Harness [dsh:3081]');
   ctx.dispose();
   assert.equal(mod.documentStub.title, '我的会话 — DeepSeek Harness');
+});
+
+// ── 点击落点：会话在哪个面板里就回哪个面板 ──────────────────────────────────
+//
+// 真机场景：super-agent 的 Router 面板占着主区域，Router 跑完一轮弹通知；用户点
+// 通知后原来落到「主视图打开 Router 会话」——因为 uiWorkspace.openSession 内部会
+// `selectPanel(null)`，把面板关掉了。面板的会话由插件自己的 retain 来源标识
+// （`superAgentUi`），这里验证浏览器半部能自己学会这个对应关系，而不是写死名字。
+
+const PANEL_MEMORY_KEY = 'dshAwayNotify.panelMemory.v1';
+
+/** 打开面板 → 面板挂载 retain 会话 → 订阅回调触发学习（保留原有会话）。 */
+function openPanelWithRetainedSession(ctx, { panelId = 'super-agent', source = 'superAgentUi', sessionId = 'router' } = {}) {
+  ctx.setPanel(panelId);
+  const byId = { ...ctx.sessions.list.getSnapshot().byId };
+  byId[sessionId] = { ...(byId[sessionId] ?? {}), id: sessionId, retainedBy: { [source]: 1 } };
+  ctx.setById(byId);
+  ctx.subscribed[0]();
+}
+
+test('会话在面板中：点通知激活该面板，而不是在主视图重开（并回执）', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router' },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['super-agent'],
+    },
+  );
+  openPanelWithRetainedSession(ctx);
+
+  mod.setPendingFocus('router');
+  mod.listeners.find(([t, ty]) => t === 'window' && ty === 'focus')[2]();
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.deepEqual(ctx.selectedPanels, ['super-agent'], '应通过 layout.selectPanel 激活会话所在面板');
+  assert.deepEqual(ctx.openedViaWorkspace, [], '不能走 openSession——它会先 selectPanel(null) 把面板关掉');
+  assert.ok(mod.fetchCalls.some((c) => JSON.parse(c.init.body).op === 'ack-focus'), '仍然要回执');
+});
+
+test('面板关掉后：靠归属记忆重新打开面板，而不是切主视图', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router' },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['super-agent'],
+    },
+  );
+  openPanelWithRetainedSession(ctx);
+
+  // 用户切回会话视图：面板卸载 → retain 释放
+  ctx.setPanel(null);
+  ctx.setById({
+    main: { id: 'main', retainedBy: { mainView: 1 } },
+    router: { id: 'router' },
+  });
+  ctx.subscribed[0]();
+
+  mod.setPendingFocus('router');
+  mod.listeners.find(([t, ty]) => t === 'window' && ty === 'focus')[2]();
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.deepEqual(ctx.selectedPanels, ['super-agent'], '面板没开时也要能打开它');
+  assert.deepEqual(ctx.openedViaWorkspace, []);
+});
+
+test('刷新后仍记得会话属于哪个面板（持久化归属记忆）', async () => {
+  const { mod, ctx } = await boot(
+    {
+      panelMemory: {
+        version: 1,
+        sessions: { router: { panelId: 'super-agent', at: Date.now() } },
+      },
+    },
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router' },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['super-agent'],
+    },
+  );
+
+  mod.setPendingFocus('router');
+  mod.listeners.find(([t, ty]) => t === 'window' && ty === 'focus')[2]();
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.deepEqual(ctx.selectedPanels, ['super-agent'], '新页面里没有画面板的内存态，靠持久化记忆补齐');
+  assert.deepEqual(ctx.openedViaWorkspace, []);
+});
+
+test('会话不在面板中：点通知仍走原来的主视图路径', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router' },
+        other: { id: 'other' },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['super-agent'],
+    },
+  );
+  openPanelWithRetainedSession(ctx);
+
+  mod.setPendingFocus('other');
+  mod.listeners.find(([t, ty]) => t === 'window' && ty === 'focus')[2]();
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.deepEqual(ctx.selectedPanels, [], '不在任何面板里的会话不该触发面板切换');
+  assert.deepEqual(ctx.openedViaWorkspace, ['other'], '保持旧行为：在主视图打开');
+});
+
+test('布局服务缺失（老版本）时：即使有面板记忆也只降级到主视图，不报错', async () => {
+  const { mod, ctx } = await boot(
+    {
+      panelMemory: {
+        version: 1,
+        sessions: { router: { panelId: 'super-agent', at: Date.now() } },
+      },
+    },
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router' },
+      },
+      layout: false,
+      sessionsOpen: false,
+      withWorkspace: true,
+    },
+  );
+
+  mod.setPendingFocus('router');
+  assert.doesNotThrow(() => mod.listeners.find(([t, ty]) => t === 'window' && ty === 'focus')[2]());
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.deepEqual(ctx.openedViaWorkspace, ['router'], '面板 API 缺失时必须退回主视图');
+  assert.deepEqual(ctx.selectedPanels, []);
+});
+
+test('selectPanel 抛错（面板未注册 / 版本不兼容）时退回主视图，点击不变成没反应', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router' },
+      },
+      layout: true,
+      panel: null,
+      selectPanelMode: 'throws',
+      sessionsOpen: false,
+      withWorkspace: true,
+    },
+  );
+  openPanelWithRetainedSession(ctx);
+
+  mod.setPendingFocus('router');
+  assert.doesNotThrow(() => mod.listeners.find(([t, ty]) => t === 'window' && ty === 'focus')[2]());
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.deepEqual(ctx.openedViaWorkspace, ['router'], '面板激活失败必须退回主视图');
+  assert.deepEqual(ctx.selectedPanels, ['super-agent'], 'selectPanel 被尝试过（随后抛错）');
+});
+
+test('面板已卸载：归属记忆指向的面板未注册时清掉记忆并退回主视图', async () => {
+  const { mod, ctx } = await boot(
+    {
+      panelMemory: {
+        version: 1,
+        sessions: { router: { panelId: 'uninstalled-panel', at: Date.now() } },
+      },
+    },
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router' },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['super-agent'],
+    },
+  );
+
+  mod.setPendingFocus('router');
+  mod.listeners.find(([t, ty]) => t === 'window' && ty === 'focus')[2]();
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.deepEqual(ctx.selectedPanels, [], '未注册的面板不能被选中');
+  assert.deepEqual(ctx.openedViaWorkspace, ['router']);
+  const stored = JSON.parse(mod.storage.getItem(PANEL_MEMORY_KEY) ?? '{}');
+  assert.equal(stored.sessions?.router, undefined, '过期记忆应被清掉，避免每次点击都白试');
+});
+
+test('面板插件显式注册来源 + showSession：点击激活面板并让面板切到该会话', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router', retainedBy: { myPanelUi: 1 } },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['my-panel'],
+    },
+  );
+
+  const shown = [];
+  const registry = ctx.provided.awayNotifyPanels;
+  assert.equal(registry?.version, 1, '应提供客户端 awayNotifyPanels 服务');
+  const dispose = registry.register({
+    panelId: 'my-panel',
+    source: 'myPanelUi',
+    showSession: (sessionId) => shown.push(sessionId),
+  });
+
+  mod.setPendingFocus('router');
+  mod.listeners.find(([t, ty]) => t === 'window' && ty === 'focus')[2]();
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.deepEqual(ctx.selectedPanels, ['my-panel']);
+  assert.deepEqual(shown, ['router'], '显式注册的 showSession 应被调用');
+  assert.deepEqual(ctx.openedViaWorkspace, []);
+  dispose();
+});
+
+test('主视图与面板都 retain 着目标会话时：当前打开的面板优先', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router' },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['super-agent'],
+    },
+  );
+  openPanelWithRetainedSession(ctx);
+
+  // 用户此前点过面板里的「打开会话」：主视图也 retain 着同一条，之后又回到了面板
+  const byId = { ...ctx.sessions.list.getSnapshot().byId };
+  byId.router = { id: 'router', retainedBy: { mainView: 1, superAgentUi: 1 } };
+  ctx.setById(byId);
+  ctx.subscribed[0]();
+
+  mod.setPendingFocus('router');
+  mod.listeners.find(([t, ty]) => t === 'window' && ty === 'focus')[2]();
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.deepEqual(ctx.selectedPanels, ['super-agent'], '你正看着面板，就不该被拉回主视图');
+  assert.deepEqual(ctx.openedViaWorkspace, []);
+});
+
+test('面板激活前就存在的 retain 来源不会被误绑成该面板的（右栏会话仍回主视图）', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        side: { id: 'side', retainedBy: { sidebarView: 1 } },
+        router: { id: 'router' },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['super-agent'],
+    },
+  );
+
+  // 打开面板时右栏已经开着：它的来源在激活快照里，不属于这个面板
+  ctx.setPanel('super-agent');
+  openPanelWithRetainedSession(ctx);
+
+  mod.setPendingFocus('side');
+  mod.listeners.find(([t, ty]) => t === 'window' && ty === 'focus')[2]();
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.deepEqual(ctx.selectedPanels, [], 'sidebarView 不该被认成 super-agent 面板的来源');
+  assert.deepEqual(ctx.openedViaWorkspace, ['side']);
+});
+
+test('URL 兼容通路也优先回到会话所在面板（与 pending-focus 同一落点）', async () => {
+  const { ctx } = await boot(
+    {
+      search: `?${FOCUS_PARAM}=router`,
+      panelMemory: {
+        version: 1,
+        sessions: { router: { panelId: 'super-agent', at: Date.now() } },
+      },
+    },
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router' },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['super-agent'],
+    },
+  );
+  await new Promise((r) => setTimeout(r, 30));
+
+  assert.deepEqual(ctx.selectedPanels, ['super-agent']);
+  assert.deepEqual(ctx.openedViaWorkspace, []);
+});
+
+// ── 显式注册（awayNotifyPanels）与自动学习的分工 ─────────────────────────────
+//
+// 自动学习是「面板被选中后 15 秒内第一个新出现的 retain 来源」的猜测；面板插件
+// 显式注册后，归属必须由注册说了算：注册优先、已注册的面板不再被学习追加来源、
+// 已注册的来源不被学习改记到别的面板。注销后回到自动学习兜底。
+
+/** 模拟「用户点了通知」：宿主返回待跳转会话 → 窗口获得焦点 → 浏览器半部处理。 */
+async function clickNotification(mod, sessionId) {
+  mod.setPendingFocus(sessionId);
+  mod.listeners.find(([t, ty]) => t === 'window' && ty === 'focus')[2]();
+  await new Promise((r) => setTimeout(r, 40));
+}
+
+test('显式注册优先于自动学习：同一来源改注册给别的面板后，点击去新面板', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router' },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['super-agent', 'my-panel'],
+    },
+  );
+  // 自动学习先把 superAgentUi 认给 super-agent
+  openPanelWithRetainedSession(ctx);
+  // 面板插件随后显式注册同一条来源（热重载后换了落点）
+  const dispose = ctx.provided.awayNotifyPanels.register({
+    panelId: 'my-panel',
+    sources: ['superAgentUi'],
+  });
+
+  await clickNotification(mod, 'router');
+
+  assert.deepEqual(ctx.selectedPanels, ['my-panel'], '显式注册必须压过自动学习');
+  assert.deepEqual(ctx.openedViaWorkspace, []);
+  dispose();
+});
+
+test('已显式注册的面板不会被自动学习追加第二个来源', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        side: { id: 'side' },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['super-agent'],
+    },
+  );
+  const dispose = ctx.provided.awayNotifyPanels.register({
+    panelId: 'super-agent',
+    sources: ['superAgentUi'],
+  });
+
+  // 面板被选中，随后出现一个**别的**来源（15 秒窗口内）
+  ctx.setPanel('super-agent');
+  const byId = { ...ctx.sessions.list.getSnapshot().byId };
+  byId.side = { id: 'side', retainedBy: { sidebarView: 1 } };
+  ctx.setById(byId);
+  ctx.subscribed[0]();
+
+  await clickNotification(mod, 'side');
+
+  assert.deepEqual(ctx.selectedPanels, [], 'sidebarView 不能被学成已注册面板的来源');
+  assert.deepEqual(ctx.openedViaWorkspace, ['side']);
+  dispose();
+});
+
+test('自动学习不会把已显式注册的来源改记到别的面板（注销后也不会跳错面板）', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router' },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['super-agent', 'my-panel'],
+    },
+  );
+  const dispose = ctx.provided.awayNotifyPanels.register({
+    panelId: 'super-agent',
+    sources: ['superAgentUi'],
+  });
+
+  // 另一个面板被选中，之后 superAgentUi 的 retain 才出现：旧实现会把它学给 my-panel
+  ctx.setPanel('my-panel');
+  const byId = { ...ctx.sessions.list.getSnapshot().byId };
+  byId.router = { id: 'router', retainedBy: { superAgentUi: 1 } };
+  ctx.setById(byId);
+  ctx.subscribed[0]();
+
+  dispose();
+  await clickNotification(mod, 'router');
+
+  assert.deepEqual(ctx.selectedPanels, [], '注销后点击不该被「学错的面板」接走');
+  assert.deepEqual(ctx.openedViaWorkspace, ['router']);
+});
+
+test('重复注册同一面板/来源只生效一份：后注册者优先，注销其中一个不影响另一个', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router', retainedBy: { superAgentUi: 1 } },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['my-panel'],
+    },
+  );
+  const shown = [];
+  const first = ctx.provided.awayNotifyPanels.register({
+    panelId: 'my-panel',
+    sources: ['superAgentUi'],
+    showSession: (id) => shown.push(`first:${id}`),
+  });
+  const second = ctx.provided.awayNotifyPanels.register({
+    panelId: 'my-panel',
+    sources: ['superAgentUi'],
+    showSession: (id) => shown.push(`second:${id}`),
+  });
+
+  // 注销其中一个句柄（同一个句柄重复注销是 no-op）：另一份注册必须仍然有效
+  first();
+  first();
+  await clickNotification(mod, 'router');
+  assert.deepEqual(ctx.selectedPanels, ['my-panel'], '只激活一次，且另一份注册仍然活着');
+  assert.deepEqual(shown, ['second:router'], '后注册的 showSession 生效，且只调用一次');
+
+  second();
+  shown.length = 0;
+  await clickNotification(mod, 'router');
+  assert.deepEqual(shown, [], '两个句柄都注销后不再有 showSession 声明');
+});
+
+test('全部注册句柄注销后回退：不再按显式注册激活面板', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router', retainedBy: { superAgentUi: 1 } },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['my-panel'],
+    },
+  );
+  const first = ctx.provided.awayNotifyPanels.register({ panelId: 'my-panel', sources: ['superAgentUi'] });
+  const second = ctx.provided.awayNotifyPanels.register({ panelId: 'my-panel', sources: ['superAgentUi'] });
+  first();
+  second();
+
+  await clickNotification(mod, 'router');
+
+  assert.deepEqual(ctx.selectedPanels, []);
+  assert.deepEqual(ctx.openedViaWorkspace, ['router']);
+});
+
+test('注销后回落自动学习：面板再次被选中时仍能把来源学给该面板', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router' },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['super-agent'],
+    },
+  );
+  const dispose = ctx.provided.awayNotifyPanels.register({
+    panelId: 'super-agent',
+    sources: ['superAgentUi'],
+  });
+  dispose();
+
+  // 面板被选中 → 面板 retain 会话 → 自动学习接管
+  ctx.setPanel('super-agent');
+  const byId = { ...ctx.sessions.list.getSnapshot().byId };
+  byId.router = { id: 'router', retainedBy: { superAgentUi: 1 } };
+  ctx.setById(byId);
+  ctx.subscribed[0]();
+
+  await clickNotification(mod, 'router');
+
+  assert.deepEqual(ctx.selectedPanels, ['super-agent'], '没有注册时自动学习仍然生效');
+  assert.deepEqual(ctx.openedViaWorkspace, []);
+});
+
+test('非法注册参数被忽略：不产生绑定、不抛错、返回可调用的注销函数', async () => {
+  const { mod, ctx } = await boot(
+    {},
+    {
+      current: '',
+      byId: {
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+        router: { id: 'router', retainedBy: { superAgentUi: 1 } },
+      },
+      layout: true,
+      panel: null,
+      sessionsOpen: false,
+      withWorkspace: true,
+      registeredPanels: ['my-panel'],
+    },
+  );
+  const registry = ctx.provided.awayNotifyPanels;
+  const disposeNoPanel = registry.register({ sources: ['superAgentUi'] });
+  const disposeNoSource = registry.register({ panelId: 'my-panel', sources: ['mainView', ''] });
+  assert.equal(typeof disposeNoPanel, 'function');
+  assert.doesNotThrow(() => {
+    disposeNoPanel();
+    disposeNoSource();
+  });
+
+  await clickNotification(mod, 'router');
+
+  assert.deepEqual(ctx.selectedPanels, [], 'mainView / 空来源都不能变成面板绑定');
+  assert.deepEqual(ctx.openedViaWorkspace, ['router']);
 });

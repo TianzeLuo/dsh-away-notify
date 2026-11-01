@@ -17,7 +17,10 @@ away-notify 通过一个 cordis 服务开放这个能力（服务名 `awayNotify
 > 默认 `['Super-agent worker ·']`）。这不是通用关键词黑名单：清单只有这一项、可清空、命中只影响
 > 通知判定。**你自己的插件请优先用 `suppressSession` / `addRule`**，别依赖标题。
 
-这是给**宿主侧**插件的通路；浏览器侧插件没有对应接口（客户端半部只负责在场上报与执行揭示）。
+这是给**宿主侧**插件的通路。浏览器侧另有一个**可选**的面板注册接口 `awayNotifyPanels`：
+如果某个主区域面板（`ctx.slots` 的 `main` keyed 槽）自己 retain 会话，它可以告诉 away-notify
+「面板 id + retain 来源」，点击通知时就会激活这个面板。**不注册也能工作**：away-notify 会在
+面板被选中后自动学习「新出现的 retain 来源 → 面板」的对应关系（见文末「面板点击落点」）。
 
 ---
 
@@ -75,6 +78,46 @@ if (away) {
 | 计数 | 逐条声明按 token 引用计数：多个调用方各自释放互不影响；`releaseSession` 一次撤销该会话的**全部**声明（抑制 + 内部 + 揭示） |
 | 缺失 | 对方没装 / 服务未就绪时 `ctx.get('awayNotify')` 返回 `undefined`，调用方自行降级即可（点击退回主视图） |
 | 版本 | 接口版本在服务对象的 `version` 字段与 `snapshot().version` 里（当前 `1`） |
+
+---
+
+## 面板点击落点（浏览器侧 `awayNotifyPanels`）
+
+主区域可能是会话视图，也可能是某个插件面板（`ctx.slots` 的 `main` keyed 槽）。面板里的会话
+由面板自己 `sessions.retain(sessionId, { source })` 挂住；**点通知时应该激活那个面板**，而不是
+走 `uiWorkspace.openSession()`——后者内部会 `selectPanel(null)`，把面板关掉。
+
+归属关系不写死任何 source 名，按优先级来自三处：
+
+1. **显式注册**（下面的服务）——最可靠，也是唯一能声明「切到某条会话」的通路；
+2. **自动学习**——面板被 `layout.selectPanel` 选中后，**第一次新出现**的 retain 来源就认作它的
+   （只存本页面内存；**已显式注册的来源不参与学习**；面板关掉后靠「会话 → 面板」记忆重新打开）；
+3. 都没有 → 保持旧行为（揭示目标 / 主视图）。
+
+```js
+// 在任意浏览器侧插件（client bundle）里；可选，不注册也能靠自动学习工作
+const panels = ctx.get('awayNotifyPanels')      // 或 ctx.inject(['awayNotifyPanels'], (c) => …)
+if (panels) {
+  const release = panels.register({
+    panelId: 'my-panel',                        // ctx.layout.selectPanel(id) 的 id
+    source: 'myPanelUi',                        // 本面板 retain 会话用的 source（也可传 sources: []）
+    // 可选：面板自己把会话切到前台。selectPanel 之后同步调用；抛错只记诊断，不影响已打开的面板
+    showSession: (sessionId) => { /* … */ },
+  })
+  release()                                     // 插件卸载时注销
+}
+```
+
+| 行为 | 说明 |
+|---|---|
+| 落点 | 会话正被某个面板来源 retain 时 `layout.selectPanel(panelId)`；会话只在记忆里（面板已关）时也尝试打开它 |
+| 优先级 | 当前打开的面板 > 主视图（若主视图也 retain 着它）> 其它面板来源 > 归属记忆 > 主视图 |
+| 降级 | 布局服务缺失、`selectPanel` 抛错、面板未注册、会话已关闭/已删除 → 一律退回「揭示目标 / 主视图」老路径，点击不会没反应 |
+| 记忆 | 「会话 → 面板」写 `localStorage`（上限 100 条、30 天过期），所以刷新后仍记得；面板卸载后面板 id 不在注册表里，记忆会在下次点击时被清掉 |
+| 学习边界 | 只在面板激活后 15 秒内学习，且每个面板只学第一条新来源；**已显式注册的来源与面板不参与学习**（注册优先；注销后自动学习照常接管）；来源绑定不持久化。误绑的代价是「这次点击开到面板而不是主视图」，刷新即恢复 |
+| 重复注册 | `register()` 每次调用是一个独立句柄，返回的注销函数幂等；重复注册同一面板/来源不会产生第二条声明，注销只撤自己那份（同一来源多次注册时后注册者优先） |
+| 取代猜测 | 把同一来源显式注册给另一个面板时，之前自动学习到的那条猜测会被丢弃——否则注销后点击会退回猜错的面板 |
+| 缺失 | 服务未提供时 `ctx.get('awayNotifyPanels')` 返回 `undefined`，面板插件自行降级即可；自动学习仍然生效 |
 
 ---
 

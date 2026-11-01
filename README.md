@@ -95,7 +95,8 @@ node scripts/selftest-notify.mjs "标题" "正文"
     internalSessionTitlePrefixes:
       - 'Super-agent worker ·'
     # 插件面板（如 super-agent 的 Router 面板）以此 source retain 会话时，
-    # 该会话算「你正在看」——面板里显示的那条不该再弹通知
+    # 该会话算「你正在看」——面板里显示的那条不该再弹通知。
+    # 浏览器半部还会从界面自动学习面板来源（并用于点击落点），这里只是后备清单
     panelSessionSources:
       - 'superAgentUi'
     cooldownMs: 10000          # 同会话同类型最小间隔
@@ -133,6 +134,8 @@ node scripts/selftest-notify.mjs "标题" "正文"
 - **两级前台抑制**：见下方[在场判定](#在场判定)
 - **不做静音黑洞**：在场状态带 45 秒 TTL，标签页崩溃 / 浏览器被关掉后自动视为「离开」，不会永久静音
 - **点击回跳**：Toast 可点击，**优先回到已有的那个 dsh 标签页**，并**自动切到出事的那条会话**；
+  如果这条会话正显示在某个**面板**里（例如 super-agent 的 Router 面板），会激活那个面板而不是
+  在主视图重开会话——面板归属是运行时学的（谁的 retain 来源在面板挂载时出现），不写死插件名。
   浏览器窗口**最小化**时也回得去（最小化的 Chromium 窗口对 UI Automation 一个标签都不暴露，脚本
   会先把窗口还原、再选标签页）。点击后约 **0.1-0.2 秒**就把对应窗口提到前台，代价是多一个常驻的
   小助手进程。原理与实测见 [docs/click-focus.md](docs/click-focus.md)
@@ -147,7 +150,9 @@ node scripts/selftest-notify.mjs "标题" "正文"
   以及「点它的通知时在右栏打开哪个 tab」，见 [给其他插件的接口](docs/plugin-api.md)。`super-agent`
   的 worker 是普通 Session（header 上没有任何标记），由它在创建时调 `awayNotify.markInternal()`
   登记、关闭时释放；本插件另保留**标题前缀**作为后备（可配置、可关闭，取舍见
-  [实现说明](docs/implementation-notes.md#32-内部会话为什么按标题识别super-agent-worker)）
+  [实现说明](docs/implementation-notes.md#32-内部会话为什么按标题识别super-agent-worker)）。
+  主区域面板还可以用浏览器侧的 `awayNotifyPanels.register({panelId, source, showSession})`
+  显式声明「我的面板 retain 这些会话」——不注册时靠自动学习也能工作
 
 ---
 
@@ -163,8 +168,10 @@ node scripts/selftest-notify.mjs "标题" "正文"
 | 有，但拿不到会话 id | 抑制全部（保守降级，等价于「不在页面上才弹」） |
 
 一个标签页可以同时报**多条**「正在看」的会话：主视图那条，加上主区域被插件面板占据时、面板里
-retain 的那条（`panelSessionSources`）。所以你在 super-agent 的 Router 面板里聊天时，Router 跑完
-一轮是**不弹**的；面板关掉、或者切到别的应用，就恢复正常提醒。
+retain 的那条（来源由 `panelSessionSources` 指定；面板插件可以显式注册，注册优先于自动学习，
+没注册时浏览器半部也会自动学习面板实际的 retain 来源）。
+所以你在 super-agent 的 Router 面板里聊天时，Router 跑完一轮是**不弹**的；面板关掉、或者切到
+别的应用，就恢复正常提醒。
 
 换句话说：**切到别的标签页**（页面不可见）或**切到别的应用**（窗口失焦）→ 一律提醒。
 

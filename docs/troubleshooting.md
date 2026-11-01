@@ -27,4 +27,5 @@
 | 点击要等一两秒 | 助手进程不在了。看 `.focus-spool/heartbeat` 的 mtime 是不是一秒一跳，见 [升级提醒](./windows.md#2-升级提醒可能残留一个旧版焦点助手进程) |
 | 通知几秒就消失 | 只有 `persistent: true` 才会用 `scenario="reminder"` + 按钮常驻；另外 reminder 场景**必须带按钮**，否则 Windows 会退化成普通通知 |
 | 回到 dsh 后提醒还赖着不走 | 控制台 `op:'state'` 看 `sessionTracking`。为 `false` 说明客户端拿不到会话 id，按会话撤回（`dismissOnReturn`）不生效。旧 bundle 跑在新 dsh 上会这样：更新插件后**刷新页面** |
+| 点了通知，会话开了但面板没打开 | 归属没认出来：面板必须**先被选中**（`layout.selectPanel`）才会被观察到它的 retain 来源；从没在这页面里打开过、也没有 `localStorage` 记忆时会退回主视图。反复出现就让面板插件显式注册 `awayNotifyPanels`（见[给其他插件的接口](./plugin-api.md)），或在控制台确认 `op:'state'` 的 `attendedSessions` 里有没有这条会话 |
 | 页面控制台查到 `mode: away` | 你开着 DevTools，页面失焦了——预期行为 |
