@@ -20,3 +20,8 @@ dsh-away-notify.log
 Thumbs.db
 .idea/
 .vscode/
+
+# 本机证据与采集产物（不入库）
+docs/*.json
+docs/screenshots/
+FIX-REPORT.md

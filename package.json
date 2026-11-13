@@ -12,7 +12,8 @@
     "./package.json": "./package.json"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.5",
+    "dsh": ">=0.1.7-rc.2"
   },
   "files": [
     "lib",
