@@ -14,9 +14,10 @@ dsh plugin --profile web add github:TianzeLuo/dsh-away-notify
 
 开发调试时可改装本地目录：`dsh plugin --profile web add /path/to/dsh-away-notify`。
 
-> **Windows 原生 dsh**：检出目录与 `$DSH_HOME` 不在同一盘符时，直接 `add` 会**静默装出一个
-> 永远不会加载的插件**（退出码仍是 0）。用仓库里的 `scripts/install-windows.ps1` 安装，
-> 它会校验并修好；细节与判定方法见 [安装避坑](docs/development.md#windows-跨盘符安装)。
+> 如果改用**本地目录**安装（而不是 `github:`）且 dsh 原生跑在 Windows：检出目录与
+> `$DSH_HOME` 不在同一盘符时会**静默装出一个永远不会加载的插件**（退出码仍是 0）。
+> 用仓库里的 `scripts/install-windows.ps1` 安装，它会校验并修好；细节与判定方法见
+> [安装避坑](docs/development.md#windows-跨盘符安装)。
 
 装完想先确认通知通道是否通，可跑一次自检（会真的弹一条 Toast 并回读通知中心）：
 见 [通知通道自检](docs/development.md#通知通道自检)。
