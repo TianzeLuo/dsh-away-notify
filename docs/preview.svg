@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="300" viewBox="0 0 640 300">
+  <rect width="640" height="300" fill="#eef1f5"/>
+
+  <rect x="24" y="22" width="592" height="256" rx="14" fill="#fbfbfb" stroke="#d7dde6" stroke-width="1.5"/>
+
+  <!-- rail -->
+  <path d="M24 36a14 14 0 0 1 14-14h24v256H38a14 14 0 0 1-14-14Z" fill="#f0f0f0"/>
+  <rect x="34" y="38" width="18" height="18" rx="6" fill="#e2e2e2"/>
+  <rect x="39" y="43" width="8" height="8" rx="2" fill="#111111"/>
+  <circle cx="43" cy="84" r="3.4" fill="none" stroke="#9a9a9a" stroke-width="1.8"/>
+  <rect x="39" y="104" width="8" height="8" rx="2" fill="none" stroke="#9a9a9a" stroke-width="1.8"/>
+  <rect x="39" y="244" width="8" height="8" rx="2" fill="none" stroke="#9a9a9a" stroke-width="1.8"/>
+
+  <!-- session list -->
+  <rect x="62" y="22" width="176" height="256" fill="#f7f7f7"/>
+  <rect x="238" y="22" width="1" height="256" fill="#ececec"/>
+  <rect x="78" y="40" width="70" height="7" rx="3.5" fill="#111111"/>
+  <rect x="78" y="62" width="128" height="6" rx="3" fill="#c9c9c9"/>
+  <rect x="78" y="78" width="96" height="6" rx="3" fill="#c9c9c9"/>
+  <rect x="78" y="94" width="112" height="6" rx="3" fill="#b9b9b9"/>
+  <rect x="78" y="118" width="140" height="6" rx="3" fill="#c9c9c9"/>
+  <rect x="78" y="134" width="104" height="6" rx="3" fill="#c9c9c9"/>
+
+  <!-- conversation -->
+  <rect x="262" y="40" width="104" height="7" rx="3.5" fill="#111111"/>
+  <rect x="262" y="56" width="52" height="4" rx="2" fill="#b9b9b9"/>
+  <rect x="262" y="86" width="180" height="6" rx="3" fill="#2f2f2f"/>
+  <rect x="262" y="100" width="148" height="6" rx="3" fill="#2f2f2f"/>
+  <rect x="262" y="114" width="112" height="6" rx="3" fill="#2f2f2f"/>
+  <rect x="330" y="136" width="112" height="26" rx="10" fill="#2f7cf6"/>
+  <rect x="262" y="178" width="156" height="6" rx="3" fill="#2f2f2f"/>
+  <rect x="262" y="192" width="120" height="6" rx="3" fill="#2f2f2f"/>
+  <rect x="254" y="222" width="372" height="40" rx="14" fill="#ffffff" stroke="#e2e6ec" stroke-width="1.5"/>
+  <rect x="270" y="234" width="140" height="5" rx="2.5" fill="#b9b9b9"/>
+  <path d="M270 251h8M274 247v8" fill="none" stroke="#8f8f8f" stroke-width="1.8" stroke-linecap="round"/>
+  <circle cx="606" cy="242" r="9.5" fill="#2f7cf6"/>
+
+  <!-- toast -->
+  <rect x="352" y="150" width="244" height="72" rx="12" fill="#d9e1ec"/>
+  <rect x="350" y="146" width="244" height="72" rx="12" fill="#ffffff" stroke="#e2e6ec" stroke-width="1.5"/>
+  <circle cx="378" cy="182" r="16" fill="#eef4ff"/>
+  <path d="M378 170.5a5.4 5.4 0 0 0-5.4 5.4v2.6c0 2.2-.8 3.7-1.6 4.7-.4.5-.05 1.2.6 1.2h12.8c.6 0 1-.7.6-1.2-.8-1-1.6-2.5-1.6-4.7v-2.6a5.4 5.4 0 0 0-5.4-5.4Z" fill="none" stroke="#2f6df0" stroke-width="1.9" stroke-linejoin="round"/>
+  <path d="M375.6 186.4a2.4 2.4 0 0 0 4.8 0" fill="none" stroke="#2f6df0" stroke-width="1.9" stroke-linecap="round"/>
+  <path d="M368 165a15 15 0 0 1 20 0" fill="none" stroke="#c3d3ec" stroke-width="1.6" stroke-linecap="round"/>
+  <path d="M364 159a21 21 0 0 1 28 0" fill="none" stroke="#dbe4f2" stroke-width="1.6" stroke-linecap="round"/>
+  <rect x="404" y="166" width="150" height="6" rx="3" fill="#2f2f2f"/>
+  <rect x="404" y="180" width="118" height="5" rx="2.5" fill="#b9b9b9"/>
+  <rect x="404" y="192" width="86" height="5" rx="2.5" fill="#c9c9c9"/>
+  <circle cx="580" cy="164" r="5" fill="#2f7cf6"/>
+
+  <!-- pointer -->
+  <path d="M600 236l-3-18 14 9-7 1.6Z" fill="#ffffff" stroke="#5a5a5a" stroke-width="1.6" stroke-linejoin="round"/>
+</svg>

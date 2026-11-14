@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Away notifications",
+    "description": "Sends a native desktop notification when a turn finishes or fails, an approval or question waits, or a goal completes — but only while you are not looking at that conversation. Clicking the notification focuses the window and switches to the session that caused it.",
+    "detail": "docs/DETAIL.md"
+  }
+}
